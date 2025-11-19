@@ -181,10 +181,11 @@ def count_nonzero_params(model: nn.Module) -> Tuple[int, int]:
 
 @dataclass
 class Individual:
-    pruning_rate: float  # between 0 and 0.9
-    fitness: float = 0.0
+    pruning_rate: float              # between 0 and 0.9
+    fitness: float = 0.0             # = validation accuracy
     nonzero_params: int = 0
     total_params: int = 0
+    sparsity: float = 0.0            # 1 - nonzero/total, for analysis only
 
 
 class GeneticAlgorithmPruning:
@@ -229,12 +230,10 @@ class GeneticAlgorithmPruning:
         nonzero, total = count_nonzero_params(model_copy)
         acc = evaluate(model_copy, self.val_loader, self.device)
 
-        # Here, fitness is simply accuracy.
-        # In your report, you can compare this to multi-objective fitness
-        # that also penalizes large models.
-        individual.fitness = acc
+        individual.fitness = acc          # fitness = accuracy (as in your base code)
         individual.nonzero_params = nonzero
         individual.total_params = total
+        individual.sparsity = 1.0 - nonzero / total
 
     def _init_population(self) -> List[Individual]:
         population = []
@@ -269,14 +268,18 @@ class GeneticAlgorithmPruning:
         new_rate = max(0.0, min(self.max_pruning_rate, new_rate))
         individual.pruning_rate = new_rate
 
-    def run(self) -> List[Individual]:
+    def run(self) -> Tuple[List[Individual], List[Individual]]:
         """
         Main GA loop:
         - initialize population
         - for each generation: evaluate, select, crossover, mutate
-        Returns the final population for analysis.
+
+        Returns:
+        - final population
+        - history of best individual per generation (for plotting/analysis)
         """
         population = self._init_population()
+        best_history: List[Individual] = []
 
         for gen in range(self.generations):
             print(f"\n=== Generation {gen+1}/{self.generations} ===")
@@ -289,10 +292,11 @@ class GeneticAlgorithmPruning:
             population.sort(key=lambda ind: ind.fitness, reverse=True)
 
             best = population[0]
-            sparsity = 1.0 - best.nonzero_params / best.total_params
+            best_history.append(copy.deepcopy(best))  # store a copy for later analysis
+
             print(
                 f"Best individual: pruning_rate={best.pruning_rate:.3f}, "
-                f"val_acc={best.fitness:.4f}, sparsity={sparsity:.3f}"
+                f"val_acc={best.fitness:.4f}, sparsity={best.sparsity:.3f}"
             )
 
             # Create next population with elitism
@@ -314,11 +318,41 @@ class GeneticAlgorithmPruning:
         for ind in population:
             self._evaluate_individual(ind)
         population.sort(key=lambda ind: ind.fitness, reverse=True)
-        return population
+        return population, best_history
 
 
 # -----------------------------
-# 6. Main script
+# 6. Extra: naive fixed pruning baselines
+# -----------------------------
+
+def evaluate_fixed_pruning_rates(
+    baseline_model: nn.Module,
+    val_loader: DataLoader,
+    device: torch.device,
+    rates: List[float],
+) -> List[Tuple[float, float, float]]:
+    """
+    Evaluate a set of fixed pruning rates as naive baselines.
+    Returns a list of (pruning_rate, accuracy, sparsity).
+    """
+    print("\n=== Naive fixed pruning baselines ===")
+    results = []
+    for rate in rates:
+        model_copy = copy.deepcopy(baseline_model)
+        apply_global_pruning(model_copy, rate)
+        nonzero, total = count_nonzero_params(model_copy)
+        sparsity = 1.0 - nonzero / total
+        acc = evaluate(model_copy, val_loader, device)
+        results.append((rate, acc, sparsity))
+        print(
+            f"Pruning rate={rate:.2f} | val_acc={acc:.4f} | "
+            f"sparsity={sparsity:.3f}"
+        )
+    return results
+
+
+# -----------------------------
+# 7. Main script
 # -----------------------------
 
 def main():
@@ -334,12 +368,23 @@ def main():
     print("Training baseline model...")
     train_baseline(baseline_model, train_loader, device, epochs=2)
 
+    # 4. Baseline evaluation (non-pruned model)
     baseline_acc = evaluate(baseline_model, val_loader, device)
     nonzero, total = count_nonzero_params(baseline_model)
-    print(f"\nBaseline accuracy: {baseline_acc:.4f}")
-    print(f"Baseline non-zero params: {nonzero}/{total}")
+    baseline_sparsity = 1.0 - nonzero / total
 
-    # 4. Genetic Algorithm to optimize pruning rate
+    print("\n=== Baseline (non-pruned) model ===")
+    print(f"Validation accuracy: {baseline_acc:.4f}")
+    print(f"Non-zero params:    {nonzero} / {total}")
+    print(f"Sparsity:           {baseline_sparsity:.3f} (should be ~0.0)\n")
+
+    # 5. Naive fixed pruning baselines (for comparison in the report)
+    fixed_rates = [0.1, 0.3, 0.5, 0.7]
+    fixed_results = evaluate_fixed_pruning_rates(
+        baseline_model, val_loader, device, fixed_rates
+    )
+
+    # 6. Genetic Algorithm to optimize pruning rate
     ga = GeneticAlgorithmPruning(
         base_model=baseline_model,
         val_loader=val_loader,
@@ -351,15 +396,36 @@ def main():
         elitism=2,
     )
 
-    final_population = ga.run()
+    final_population, best_history = ga.run()
 
-    # 5. Print best solution
+    # 7. Print best GA solution
     best = final_population[0]
     sparsity = 1.0 - best.nonzero_params / best.total_params
-    print("\n=== Final Best Solution ===")
-    print(f"Pruning rate: {best.pruning_rate:.3f}")
+    print("\n=== Final Best Solution (GA) ===")
+    print(f"Pruning rate:        {best.pruning_rate:.3f}")
     print(f"Validation accuracy: {best.fitness:.4f}")
-    print(f"Sparsity (1 - nonzero/total): {sparsity:.3f}")
+    print(f"Sparsity:            {sparsity:.3f}")
+
+    # 8. Quick comparison summary
+    acc_drop = baseline_acc - best.fitness
+    print(
+        f"\nAccuracy drop vs baseline: {acc_drop:.4f} "
+        f"(baseline={baseline_acc:.4f} → pruned={best.fitness:.4f})"
+    )
+
+    print("\n=== Summary: fixed baselines vs GA ===")
+    for rate, acc, sp in fixed_results:
+        print(
+            f"[Fixed] rate={rate:.2f} | acc={acc:.4f} | sparsity={sp:.3f}"
+        )
+    print(
+        f"[ GA  ] rate={best.pruning_rate:.3f} | acc={best.fitness:.4f} | "
+        f"sparsity={sparsity:.3f}"
+    )
+
+    # You can later use `best_history` in a notebook to plot:
+    # - best accuracy vs generation
+    # - best pruning_rate vs generation
 
 
 if __name__ == "__main__":
