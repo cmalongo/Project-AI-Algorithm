@@ -63,4 +63,13 @@ This provides strong material for the *Empirical Evaluation* required in the pro
 ---
 
 ## 📁 Repository Structure
+.
+├── main.py                  # Full implementation (MLP + Pruning + GA)
+├── README.md                # You are here
+├── requirements.txt         # Dependencies for the project
+├── report/
+│   ├── main.tex             # LaTeX report (Option A structure)
+│   ├── references.bib       # Bibliography for the report
+│   └── figures/             # Plots and figures 
+
 
